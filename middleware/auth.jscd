@@ -1,0 +1,100 @@
+const jwt = require('jsonwebtoken');
+const db = require('../config/database');
+
+const authenticateToken = async (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) {
+    return res.status(401).json({ message: 'Access token required' });
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
+    
+    // Get user from database
+    const [users] = await db.execute(
+      'SELECT id, email, full_name, gender FROM users WHERE id = ?',
+      [decoded.userId]
+    );
+
+    if (users.length === 0) {
+      return res.status(401).json({ message: 'Invalid token' });
+    }
+
+    req.user = users[0];
+    next();
+  } catch (error) {
+    return res.status(403).json({ message: 'Invalid or expired token' });
+  }
+};
+
+module.exports = { authenticateToken };
+
+// ==============================================
+// scripts/seed.js - Sample data for testing
+// ==============================================
+
+const db = require('../config/database');
+
+const seedData = async () => {
+  try {
+    // Sample accommodations
+    const accommodations = [
+      {
+        name: 'Cozy Central Hostel',
+        description: 'A safe and clean hostel in the heart of the city',
+        city: 'Bangalore',
+        address: 'MG Road, Bangalore, Karnataka',
+        latitude: 12.9716,
+        longitude: 77.5946,
+        price_per_night: 2500,
+        accommodation_type: 'hostel',
+        amenities: JSON.stringify(['Free WiFi', '24/7 Security', 'Female Dorm', 'Kitchen', 'Common Area']),
+        photos: JSON.stringify(['hostel1.jpg', 'hostel2.jpg', 'hostel3.jpg'])
+      },
+      {
+        name: 'Backpacker\'s Paradise',
+        description: 'Budget-friendly hostel with great social atmosphere',
+        city: 'Pune',
+        address: 'Koregaon Park, Pune, Maharashtra',
+        latitude: 18.5204,
+        longitude: 73.8567,
+        price_per_night: 1800,
+        accommodation_type: 'hostel',
+        amenities: JSON.stringify(['WiFi', 'Common Area', 'Laundry', 'Cafe', 'Bike Rental']),
+        photos: JSON.stringify(['hostel4.jpg', 'hostel5.jpg'])
+      },
+      {
+        name: 'Urban Nomad Hub',
+        description: 'Modern co-living space for digital nomads',
+        city: 'Mumbai',
+        address: 'Bandra West, Mumbai, Maharashtra',
+        latitude: 19.0760,
+        longitude: 72.8777,
+        price_per_night: 3200,
+        accommodation_type: 'hostel',
+        amenities: JSON.stringify(['Co-working Space', 'AC', '24/7 Security', 'Rooftop', 'High-speed WiFi']),
+        photos: JSON.stringify(['nomad1.jpg', 'nomad2.jpg', 'nomad3.jpg'])
+      }
+    ];
+
+    for (const acc of accommodations) {
+      await db.execute(`
+        INSERT INTO accommodations 
+        (name, description, city, address, latitude, longitude, price_per_night, accommodation_type, amenities, photos)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [
+        acc.name, acc.description, acc.city, acc.address, 
+        acc.latitude, acc.longitude, acc.price_per_night, 
+        acc.accommodation_type, acc.amenities, acc.photos
+      ]);
+    }
+
+    console.log('✅ Sample data seeded successfully!');
+  } catch (error) {
+    console.error('❌ Seeding failed:', error.message);
+  }
+};
+
+seedData();
