@@ -1,93 +1,91 @@
-// Update your backend/routes/accommodations.js
-
+// routes/accommodations.js - PostgreSQL Compatible Routes
 const express = require('express');
 const router = express.Router();
 const db = require('../config/database');
 
-// Search accommodations - REMOVE VALIDATION FOR NOW
+// Search accommodations with filters
 router.get('/search', async (req, res) => {
     try {
-        console.log('🔍 Search request received:', req.query);
+        console.log('🔍 Accommodation search request:', req.query);
         
         const { city, checkin, checkout, type } = req.query;
         
-        // Build basic query without strict validation
         let query = `
             SELECT 
-                id,
-                name,
-                description,
-                city,
-                address,
-                price_per_night,
-                accommodation_type,
-                amenities,
-                photos,
-                is_active
+                id, name, description, city, address, 
+                price_per_night, accommodation_type, 
+                amenities, photos, is_active, created_at
             FROM accommodations 
-            WHERE is_active = 1
+            WHERE is_active = true
         `;
         
         const params = [];
+        let paramCount = 0;
         
         // Add city filter if provided
         if (city && city.trim() !== '') {
-            query += ` AND (city LIKE ? OR name LIKE ?)`;
-            params.push(`%${city}%`, `%${city}%`);
+            paramCount++;
+            if (process.env.DATABASE_URL) {
+                // PostgreSQL syntax
+                query += ` AND LOWER(city) LIKE LOWER($${paramCount})`;
+            } else {
+                // MySQL syntax
+                query += ` AND LOWER(city) LIKE LOWER(?)`;
+            }
+            params.push(`%${city.trim()}%`);
         }
         
         // Add type filter if provided
-        if (type && type !== 'all') {
-            query += ` AND accommodation_type = ?`;
-            params.push(type);
+        if (type && type.trim() !== '') {
+            paramCount++;
+            if (process.env.DATABASE_URL) {
+                query += ` AND accommodation_type = $${paramCount}`;
+            } else {
+                query += ` AND accommodation_type = ?`;
+            }
+            params.push(type.trim());
         }
         
-        query += ` ORDER BY created_at DESC LIMIT 50`;
+        query += ' ORDER BY price_per_night ASC';
         
-        console.log('📊 Executing query:', query);
-        console.log('📊 With params:', params);
+        console.log('📝 Query:', query);
+        console.log('📝 Params:', params);
         
-        const [rows] = await db.execute(query, params);
+        let results;
         
-        console.log(`✅ Found ${rows.length} accommodations`);
-        
-        // Process results
-        const accommodations = rows.map(acc => {
-            let amenities = [];
-            let photos = [];
-            
+        if (process.env.DATABASE_URL) {
+            // PostgreSQL query
+            const client = await db.connect();
             try {
-                amenities = acc.amenities ? JSON.parse(acc.amenities) : [];
-            } catch (e) {
-                console.warn('Failed to parse amenities for accommodation', acc.id);
-                amenities = [];
+                const result = await client.query(query, params);
+                results = result.rows;
+            } finally {
+                client.release();
             }
-            
-            try {
-                photos = acc.photos ? JSON.parse(acc.photos) : [];
-            } catch (e) {
-                console.warn('Failed to parse photos for accommodation', acc.id);
-                photos = [];
-            }
-            
-            return {
-                ...acc,
-                amenities,
-                photos,
-                safety_rating: 4,
-                verified: true,
-                average_rating: 4.2
-            };
-        });
+        } else {
+            // MySQL query
+            const [rows] = await db.execute(query, params);
+            results = rows;
+        }
+        
+        console.log(`✅ Found ${results.length} accommodations`);
+        
+        // Add calculated fields for frontend compatibility
+        const accommodationsWithExtras = results.map(acc => ({
+            ...acc,
+            safety_rating: 4, // Default safety rating
+            verified: true,   // Default verification status
+            average_rating: 4.2 // Default average rating
+        }));
         
         res.json({
             success: true,
-            count: accommodations.length,
-            accommodations: accommodations
+            count: accommodationsWithExtras.length,
+            accommodations: accommodationsWithExtras
         });
         
     } catch (error) {
-        console.error('❌ Search error:', error);
+        console.error('❌ Accommodation search error:', error);
         res.status(500).json({
             success: false,
             message: 'Error searching accommodations',
@@ -96,57 +94,76 @@ router.get('/search', async (req, res) => {
     }
 });
 
-// Get single accommodation
+// Get specific accommodation by ID
 router.get('/:id', async (req, res) => {
     try {
         const { id } = req.params;
+        console.log(`🏨 Getting accommodation details for ID: ${id}`);
         
-        if (!id || isNaN(id)) {
-            return res.status(400).json({
-                success: false,
-                message: 'Invalid accommodation ID'
-            });
+        let query, results;
+        
+        if (process.env.DATABASE_URL) {
+            // PostgreSQL query
+            query = `
+                SELECT 
+                    id, name, description, city, address, 
+                    latitude, longitude, price_per_night, 
+                    accommodation_type, amenities, photos, 
+                    contact_info, is_active, created_at
+                FROM accommodations 
+                WHERE id = $1 AND is_active = true
+            `;
+            
+            const client = await db.connect();
+            try {
+                const result = await client.query(query, [id]);
+                results = result.rows;
+            } finally {
+                client.release();
+            }
+        } else {
+            // MySQL query
+            query = `
+                SELECT 
+                    id, name, description, city, address, 
+                    latitude, longitude, price_per_night, 
+                    accommodation_type, amenities, photos, 
+                    contact_info, is_active, created_at
+                FROM accommodations 
+                WHERE id = ? AND is_active = true
+            `;
+            
+            const [rows] = await db.execute(query, [id]);
+            results = rows;
         }
         
-        const [rows] = await db.execute(
-            `SELECT * FROM accommodations WHERE id = ? AND is_active = 1`,
-            [id]
-        );
-        
-        if (rows.length === 0) {
+        if (results.length === 0) {
             return res.status(404).json({
                 success: false,
                 message: 'Accommodation not found'
             });
         }
         
-        const accommodation = rows[0];
+        const accommodation = {
+            ...results[0],
+            safety_rating: 4,
+            verified: true,
+            average_rating: 4.2
+        };
         
-        // Process JSON fields safely
-        try {
-            accommodation.amenities = accommodation.amenities ? JSON.parse(accommodation.amenities) : [];
-            accommodation.photos = accommodation.photos ? JSON.parse(accommodation.photos) : [];
-            accommodation.contact_info = accommodation.contact_info ? JSON.parse(accommodation.contact_info) : {};
-        } catch (e) {
-            accommodation.amenities = [];
-            accommodation.photos = [];
-            accommodation.contact_info = {};
-        }
-        
-        accommodation.safety_rating = 4;
-        accommodation.verified = true;
-        accommodation.average_rating = 4.2;
+        console.log('✅ Accommodation details retrieved');
         
         res.json({
             success: true,
-            accommodation: accommodation
+            accommodation
         });
         
     } catch (error) {
         console.error('❌ Get accommodation error:', error);
         res.status(500).json({
             success: false,
-            message: 'Error fetching accommodation'
+            message: 'Error retrieving accommodation',
+            error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
         });
     }
 });
@@ -154,8 +171,9 @@ router.get('/:id', async (req, res) => {
 // Test route
 router.get('/test', (req, res) => {
     res.json({ 
-        message: 'Accommodations routes working!',
-        timestamp: new Date().toISOString()
+        message: 'Accommodations route is working!',
+        timestamp: new Date().toISOString(),
+        database: process.env.DATABASE_URL ? 'PostgreSQL (Render)' : 'MySQL (Local)'
     });
 });
 
