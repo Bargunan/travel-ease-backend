@@ -1,129 +1,234 @@
+// routes/auth.js - PostgreSQL Compatible Authentication
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { body, validationResult } = require('express-validator');
+const router = express.Router();
 const db = require('../config/database');
 
-const router = express.Router();
-
-// Test route
-router.get('/test', (req, res) => {
-  res.json({ message: 'Auth routes working!' });
-});
-
-// User registration
+// User signup
 router.post('/signup', [
-  body('email').isEmail().normalizeEmail(),
-  body('password').isLength({ min: 6 }),
-  body('full_name').isLength({ min: 2 }),
-  body('gender').isIn(['male', 'female', 'other']),
-  body('age').isInt({ min: 18, max: 80 })
+    body('email').isEmail().normalizeEmail(),
+    body('password').isLength({ min: 6 }),
+    body('full_name').trim().isLength({ min: 2 }),
+    body('age').isInt({ min: 18, max: 100 }),
+    body('gender').isIn(['male', 'female', 'other'])
 ], async (req, res) => {
-  try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ errors: errors.array() });
+    try {
+        // Check validation errors
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).json({
+                success: false,
+                message: 'Validation failed',
+                errors: errors.array()
+            });
+        }
+
+        const { email, password, full_name, age, gender, interests } = req.body;
+
+        // Check if user already exists
+        let checkQuery, existingUser;
+        
+        if (process.env.DATABASE_URL) {
+            // PostgreSQL
+            checkQuery = 'SELECT id FROM users WHERE email = $1';
+            const client = await db.connect();
+            try {
+                const result = await client.query(checkQuery, [email]);
+                existingUser = result.rows;
+            } finally {
+                client.release();
+            }
+        } else {
+            // MySQL
+            checkQuery = 'SELECT id FROM users WHERE email = ?';
+            const [rows] = await db.execute(checkQuery, [email]);
+            existingUser = rows;
+        }
+
+        if (existingUser.length > 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'User with this email already exists'
+            });
+        }
+
+        // Hash password
+        const salt = await bcrypt.genSalt(12);
+        const password_hash = await bcrypt.hash(password, salt);
+
+        // Insert new user
+        let insertQuery, insertResult;
+        const interestsJson = Array.isArray(interests) ? interests : [];
+
+        if (process.env.DATABASE_URL) {
+            // PostgreSQL
+            insertQuery = `
+                INSERT INTO users (email, password_hash, full_name, age, gender, interests) 
+                VALUES ($1, $2, $3, $4, $5, $6) 
+                RETURNING id, email, full_name, age, gender
+            `;
+            
+            const client = await db.connect();
+            try {
+                const result = await client.query(insertQuery, [
+                    email, password_hash, full_name, age, gender, JSON.stringify(interestsJson)
+                ]);
+                insertResult = result.rows[0];
+            } finally {
+                client.release();
+            }
+        } else {
+            // MySQL
+            insertQuery = `
+                INSERT INTO users (email, password_hash, full_name, age, gender, interests) 
+                VALUES (?, ?, ?, ?, ?, ?)
+            `;
+            
+            const [result] = await db.execute(insertQuery, [
+                email, password_hash, full_name, age, gender, JSON.stringify(interestsJson)
+            ]);
+            
+            // Get the inserted user
+            const [userRows] = await db.execute(
+                'SELECT id, email, full_name, age, gender FROM users WHERE id = ?', 
+                [result.insertId]
+            );
+            insertResult = userRows[0];
+        }
+
+        // Generate JWT token
+        const token = jwt.sign(
+            { 
+                userId: insertResult.id, 
+                email: insertResult.email 
+            },
+            process.env.JWT_SECRET,
+            { expiresIn: '7d' }
+        );
+
+        console.log(`✅ New user created: ${email}`);
+
+        res.status(201).json({
+            success: true,
+            message: 'User created successfully',
+            token,
+            user: {
+                id: insertResult.id,
+                email: insertResult.email,
+                full_name: insertResult.full_name,
+                age: insertResult.age,
+                gender: insertResult.gender
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ Signup error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Error creating user',
+            error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+        });
     }
-
-    const { email, password, full_name, gender, age, interests } = req.body;
-
-    // Check if user exists
-    const [existingUsers] = await db.execute(
-      'SELECT id FROM users WHERE email = ?',
-      [email]
-    );
-
-    if (existingUsers.length > 0) {
-      return res.status(400).json({ message: 'User already exists' });
-    }
-
-    // Hash password
-    const password_hash = await bcrypt.hash(password, 12);
-
-    // Create user
-    const [result] = await db.execute(
-      `INSERT INTO users (email, password_hash, full_name, gender, age, interests) 
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [email, password_hash, full_name, gender, age, JSON.stringify(interests || [])]
-    );
-
-    // Generate JWT token
-    const token = jwt.sign(
-      { userId: result.insertId, email },
-      process.env.JWT_SECRET || 'your-secret-key',
-      { expiresIn: '7d' }
-    );
-
-    res.status(201).json({
-      message: 'User created successfully',
-      token,
-      user: {
-        id: result.insertId,
-        email,
-        full_name,
-        gender,
-        age
-      }
-    });
-  } catch (error) {
-    console.error('Signup error:', error);
-    res.status(500).json({ message: 'Internal server error' });
-  }
 });
 
 // User login
 router.post('/login', [
-  body('email').isEmail().normalizeEmail(),
-  body('password').exists()
+    body('email').isEmail().normalizeEmail(),
+    body('password').exists()
 ], async (req, res) => {
-  try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ errors: errors.array() });
+    try {
+        // Check validation errors
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).json({
+                success: false,
+                message: 'Validation failed',
+                errors: errors.array()
+            });
+        }
+
+        const { email, password } = req.body;
+
+        // Find user by email
+        let query, user;
+        
+        if (process.env.DATABASE_URL) {
+            // PostgreSQL
+            query = 'SELECT id, email, password_hash, full_name, age, gender FROM users WHERE email = $1';
+            const client = await db.connect();
+            try {
+                const result = await client.query(query, [email]);
+                user = result.rows[0];
+            } finally {
+                client.release();
+            }
+        } else {
+            // MySQL
+            query = 'SELECT id, email, password_hash, full_name, age, gender FROM users WHERE email = ?';
+            const [rows] = await db.execute(query, [email]);
+            user = rows[0];
+        }
+
+        if (!user) {
+            return res.status(401).json({
+                success: false,
+                message: 'Invalid email or password'
+            });
+        }
+
+        // Check password
+        const isValidPassword = await bcrypt.compare(password, user.password_hash);
+        if (!isValidPassword) {
+            return res.status(401).json({
+                success: false,
+                message: 'Invalid email or password'
+            });
+        }
+
+        // Generate JWT token
+        const token = jwt.sign(
+            { 
+                userId: user.id, 
+                email: user.email 
+            },
+            process.env.JWT_SECRET,
+            { expiresIn: '7d' }
+        );
+
+        console.log(`✅ User logged in: ${email}`);
+
+        res.json({
+            success: true,
+            message: 'Login successful',
+            token,
+            user: {
+                id: user.id,
+                email: user.email,
+                full_name: user.full_name,
+                age: user.age,
+                gender: user.gender
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ Login error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Error during login',
+            error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+        });
     }
+});
 
-    const { email, password } = req.body;
-
-    // Find user
-    const [users] = await db.execute(
-      'SELECT id, email, password_hash, full_name, gender, age FROM users WHERE email = ?',
-      [email]
-    );
-
-    if (users.length === 0) {
-      return res.status(401).json({ message: 'Invalid credentials' });
-    }
-
-    const user = users[0];
-
-    // Check password
-    const isValidPassword = await bcrypt.compare(password, user.password_hash);
-    if (!isValidPassword) {
-      return res.status(401).json({ message: 'Invalid credentials' });
-    }
-
-    // Generate JWT token
-    const token = jwt.sign(
-      { userId: user.id, email: user.email },
-      process.env.JWT_SECRET || 'your-secret-key',
-      { expiresIn: '7d' }
-    );
-
-    res.json({
-      message: 'Login successful',
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        full_name: user.full_name,
-        gender: user.gender,
-        age: user.age
-      }
+// Test route
+router.get('/test', (req, res) => {
+    res.json({ 
+        message: 'Auth route is working!',
+        timestamp: new Date().toISOString(),
+        database: process.env.DATABASE_URL ? 'PostgreSQL (Render)' : 'MySQL (Local)'
     });
-  } catch (error) {
-    console.error('Login error:', error);
-    res.status(500).json({ message: 'Internal server error' });
-  }
 });
 
 module.exports = router;
