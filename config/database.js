@@ -1,10 +1,10 @@
-// config/database.js - Updated for Render PostgreSQL + Local MySQL
+// config/database.js - Universal Database Configuration
 require('dotenv').config();
 
 let dbConfig;
 
 if (process.env.DATABASE_URL) {
-    // PostgreSQL configuration for Render deployment
+    // PostgreSQL configuration for Render
     console.log('🐘 Using PostgreSQL database (Render)');
     
     const { Pool } = require('pg');
@@ -12,7 +12,7 @@ if (process.env.DATABASE_URL) {
     dbConfig = new Pool({
         connectionString: process.env.DATABASE_URL,
         ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-        max: 10, // Maximum number of connections
+        max: 10,
         idleTimeoutMillis: 30000,
         connectionTimeoutMillis: 2000,
     });
@@ -41,8 +41,6 @@ if (process.env.DATABASE_URL) {
         waitForConnections: true,
         connectionLimit: 10,
         queueLimit: 0,
-        acquireTimeout: 60000,
-        timeout: 60000,
     });
 
     // Test MySQL connection
@@ -55,28 +53,5 @@ if (process.env.DATABASE_URL) {
             console.error('❌ MySQL connection error:', err.message);
         });
 }
-
-// Universal query function that works with both PostgreSQL and MySQL
-dbConfig.query = async function(sql, params = []) {
-    try {
-        if (process.env.DATABASE_URL) {
-            // PostgreSQL query
-            const client = await this.connect();
-            try {
-                const result = await client.query(sql, params);
-                return result.rows;
-            } finally {
-                client.release();
-            }
-        } else {
-            // MySQL query
-            const [rows] = await this.execute(sql, params);
-            return rows;
-        }
-    } catch (error) {
-        console.error('Database query error:', error);
-        throw error;
-    }
-};
 
 module.exports = dbConfig;
